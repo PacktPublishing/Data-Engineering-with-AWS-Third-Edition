@@ -1,7 +1,7 @@
 -- ============================================================
 -- 00_schema.sql
--- Schema for the Kevin Bacon 6-Degrees Demo Database
--- Designed for Aurora PostgreSQL
+-- Data Engineering with AWS, 3rd Edition - Chapter 6
+-- Schema for the movie catalog source database (Aurora PostgreSQL)
 --
 -- Execution order:
 --   00_schema.sql       <- this file (run first)
@@ -47,7 +47,7 @@ CREATE TABLE movies (
     created_at    TIMESTAMP       DEFAULT NOW()
 );
 
-COMMENT ON TABLE  movies              IS 'Core movie catalogue. ~700 films seeded for the Bacon game.';
+COMMENT ON TABLE  movies              IS 'Core movie catalog of 627 films.';
 COMMENT ON COLUMN movies.title        IS 'Official release title of the film.';
 COMMENT ON COLUMN movies.release_year IS 'Year the film was theatrically released.';
 COMMENT ON COLUMN movies.genre        IS 'Primary genre classification.';
@@ -63,7 +63,7 @@ CREATE TABLE actors (
     created_at  TIMESTAMP       DEFAULT NOW()
 );
 
-COMMENT ON TABLE  actors            IS 'Actors and actresses. ~500 seeded for the Bacon game.';
+COMMENT ON TABLE  actors            IS 'Actors and actresses appearing in the catalog.';
 COMMENT ON COLUMN actors.full_name  IS 'Full name of the actor/actress.';
 COMMENT ON COLUMN actors.birth_year IS 'Year of birth (used for disambiguation of same-name actors).';
 
@@ -79,7 +79,7 @@ CREATE TABLE movie_cast (
     PRIMARY KEY (movie_id, actor_id)
 );
 
-COMMENT ON TABLE  movie_cast           IS 'Junction table linking actors to movies. This is the GRAPH EDGE for the Bacon game — two actors are connected if they share a movie_id.';
+COMMENT ON TABLE  movie_cast           IS 'Junction table linking actors to movies. Two actors are connected if they share a movie_id.';
 COMMENT ON COLUMN movie_cast.role_name IS 'Character name played by the actor in this film.';
 COMMENT ON COLUMN movie_cast.is_lead   IS 'TRUE if this actor received top billing / lead role.';
 
@@ -96,7 +96,7 @@ CREATE TABLE ratings (
     CONSTRAINT chk_score_range CHECK (platform_score >= 0 AND platform_score <= 10)
 );
 
-COMMENT ON TABLE  ratings                IS 'Single synthetic platform rating per movie, in the style of a streaming platform''s own rating display. Scores are approximate, LLM-reconstructed, and for educational use only — not sourced from or claiming to represent any real third-party platform''s actual rating.';
+COMMENT ON TABLE  ratings                IS 'Single synthetic platform rating per movie, in the style of a streaming platform''s own rating display. Scores are approximate, LLM-generated, and for educational use only. They are not sourced from, and do not represent, any real platform''s actual rating.';
 COMMENT ON COLUMN ratings.platform_score IS 'Synthetic 0-10 platform rating, loosely informed by the film''s real-world critical/audience reception.';
 COMMENT ON COLUMN ratings.rating_count   IS 'Simulated popularity count for narrative realism only; does not reflect any real platform''s actual rating volume.';
 
@@ -104,7 +104,7 @@ COMMENT ON COLUMN ratings.rating_count   IS 'Simulated popularity count for narr
 -- INDEXES
 -- ============================================================
 
--- Speed up graph traversal (BFS for Bacon number)
+-- Speed up lookups between actors and movies
 CREATE INDEX idx_movie_cast_actor   ON movie_cast(actor_id);
 CREATE INDEX idx_movie_cast_movie   ON movie_cast(movie_id);
 
@@ -118,9 +118,12 @@ CREATE INDEX idx_ratings_movie      ON ratings(movie_id);
 
 -- ============================================================
 -- VIEWS
+-- These are optional extras, not used by the Chapter 6
+-- hands-on exercises. They are included as examples of the
+-- kinds of queries this catalog supports.
 -- ============================================================
 
--- Convenient denormalized view for RAG / GenAI queries
+-- Denormalized view of each movie, with its director, rating, and cast size
 CREATE OR REPLACE VIEW v_movie_full AS
 SELECT
     m.movie_id,
@@ -172,65 +175,7 @@ JOIN actors      a1  ON a1.actor_id  = mc1.actor_id
 JOIN actors      a2  ON a2.actor_id  = mc2.actor_id
 JOIN movies      m   ON m.movie_id   = mc1.movie_id;
 
-COMMENT ON VIEW v_costar_pairs IS 'All direct co-star pairs with the movie they share. Bacon number = 1 pairs.';
-
--- ============================================================
--- BACON NUMBER FUNCTION
--- Finds shortest path (Bacon number) from any actor to Kevin Bacon
--- Usage: SELECT * FROM fn_bacon_number('Tom Hanks');
--- ============================================================
-CREATE OR REPLACE FUNCTION fn_bacon_number(target_actor_name VARCHAR)
-RETURNS TABLE (
-    actor_name   VARCHAR,
-    bacon_number INT,
-    via_movie    VARCHAR,
-    via_actor    VARCHAR
-) AS $$
-WITH RECURSIVE bacon_bfs AS (
-
-    -- Seed: Kevin Bacon (actor_id = 1)
-    SELECT
-        a.actor_id,
-        a.full_name,
-        0               AS bacon_number,
-        NULL::VARCHAR   AS via_movie,
-        NULL::VARCHAR   AS via_actor,
-        ARRAY[a.actor_id] AS visited
-    FROM actors a
-    WHERE a.full_name = 'Kevin Bacon'
-
-    UNION ALL
-
-    -- Hop: find actors sharing a movie with someone already in the frontier
-    SELECT
-        a2.actor_id,
-        a2.full_name,
-        bfs.bacon_number + 1,
-        m.title,
-        bfs.full_name,
-        bfs.visited || a2.actor_id
-    FROM bacon_bfs        bfs
-    JOIN movie_cast       mc1 ON mc1.actor_id = bfs.actor_id
-    JOIN movie_cast       mc2 ON mc2.movie_id  = mc1.movie_id
-                              AND mc2.actor_id != bfs.actor_id
-    JOIN actors           a2  ON a2.actor_id   = mc2.actor_id
-    JOIN movies           m   ON m.movie_id     = mc1.movie_id
-    WHERE NOT (a2.actor_id = ANY(bfs.visited))
-      AND bfs.bacon_number < 6
-
-)
-SELECT DISTINCT ON (full_name)
-    full_name,
-    bacon_number,
-    via_movie,
-    via_actor
-FROM bacon_bfs
-WHERE full_name ILIKE '%' || target_actor_name || '%'
-ORDER BY full_name, bacon_number ASC;
-
-$$ LANGUAGE sql;
-
-COMMENT ON FUNCTION fn_bacon_number IS 'Breadth-first search to find the Bacon number (shortest path to Kevin Bacon) for any actor name. Uses recursive CTE. Max depth = 6.';
+COMMENT ON VIEW v_costar_pairs IS 'All direct co-star pairs with the movie they share.';
 
 -- ============================================================
 -- VERIFY SCHEMA

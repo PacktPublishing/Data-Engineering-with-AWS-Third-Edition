@@ -1,6 +1,9 @@
 -- ============================================================
 -- 03_actors.sql
--- Actors for the Kevin Bacon 6-Degrees Demo Database
+-- Data Engineering with AWS, 3rd Edition - Chapter 6
+-- Movie catalog: actors (713 rows)
+--
+-- Run after 02_movies.sql.
 -- ============================================================
 
 INSERT INTO actors (actor_id, full_name, birth_year) VALUES

@@ -1,6 +1,9 @@
 -- ============================================================
 -- 01_directors.sql
--- Directors for the Kevin Bacon 6-Degrees Demo Database
+-- Data Engineering with AWS, 3rd Edition - Chapter 6
+-- Movie catalog: directors (120 rows)
+--
+-- Run after 00_schema.sql.
 -- ============================================================
 
 INSERT INTO directors (director_id, full_name, birth_year) VALUES
