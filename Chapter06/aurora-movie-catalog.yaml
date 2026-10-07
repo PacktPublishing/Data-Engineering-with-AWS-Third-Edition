@@ -1,0 +1,277 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Description: >
+  Data Engineering with AWS, 3rd Edition - Chapter 6 hands-on.
+  Deploys an Aurora PostgreSQL Serverless v2 cluster, in a new VPC with
+  public and private subnets, for use as the movie catalog source database
+  in the AWS Glue ingestion exercise. Credentials are generated and stored
+  in AWS Secrets Manager.
+
+Parameters:
+  DatabaseName:
+    Type: String
+    Default: moviecatalog
+    Description: Name of the initial database created on the Aurora cluster.
+
+  MasterUsername:
+    Type: String
+    Default: dbadmin
+    Description: Master username for the Aurora cluster.
+
+Resources:
+
+  # ============================================================
+  # NETWORKING
+  # ============================================================
+
+  VPC:
+    Type: AWS::EC2::VPC
+    Properties:
+      CidrBlock: 10.20.0.0/16
+      EnableDnsSupport: true
+      EnableDnsHostnames: true
+      Tags:
+        - Key: Name
+          Value: movie-catalog-aurora-VPC
+
+  InternetGateway:
+    Type: AWS::EC2::InternetGateway
+    Properties:
+      Tags:
+        - Key: Name
+          Value: movie-catalog-igw
+
+  InternetGatewayAttachment:
+    Type: AWS::EC2::VPCGatewayAttachment
+    Properties:
+      VpcId: !Ref VPC
+      InternetGatewayId: !Ref InternetGateway
+
+  PublicSubnet:
+    Type: AWS::EC2::Subnet
+    Properties:
+      VpcId: !Ref VPC
+      CidrBlock: 10.20.0.0/24
+      AvailabilityZone: !Select [0, !GetAZs '']
+      MapPublicIpOnLaunch: true
+      Tags:
+        - Key: Name
+          Value: movie-catalog-public-subnet
+
+  PrivateSubnetA:
+    Type: AWS::EC2::Subnet
+    Properties:
+      VpcId: !Ref VPC
+      CidrBlock: 10.20.1.0/24
+      AvailabilityZone: !Select [0, !GetAZs '']
+      Tags:
+        - Key: Name
+          Value: movie-catalog-private-subnet-a
+
+  PrivateSubnetB:
+    Type: AWS::EC2::Subnet
+    Properties:
+      VpcId: !Ref VPC
+      CidrBlock: 10.20.2.0/24
+      AvailabilityZone: !Select [1, !GetAZs '']
+      Tags:
+        - Key: Name
+          Value: movie-catalog-private-subnet-b
+
+  PublicRouteTable:
+    Type: AWS::EC2::RouteTable
+    Properties:
+      VpcId: !Ref VPC
+      Tags:
+        - Key: Name
+          Value: movie-catalog-public-rt
+
+  PublicRoute:
+    Type: AWS::EC2::Route
+    DependsOn: InternetGatewayAttachment
+    Properties:
+      RouteTableId: !Ref PublicRouteTable
+      DestinationCidrBlock: 0.0.0.0/0
+      GatewayId: !Ref InternetGateway
+
+  PublicSubnetRouteTableAssociation:
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    Properties:
+      SubnetId: !Ref PublicSubnet
+      RouteTableId: !Ref PublicRouteTable
+
+  NatGatewayEIP:
+    Type: AWS::EC2::EIP
+    DependsOn: InternetGatewayAttachment
+    Properties:
+      Domain: vpc
+
+  # A NAT Gateway gives our private subnets a general-purpose route to the
+  # internet, covering Secrets Manager, the Glue Data Catalog API (used
+  # directly by Iceberg's GlueCatalog implementation), and anything else
+  # our Glue job needs to reach, without us needing to add a separate
+  # Interface Endpoint for each individual AWS service one at a time.
+  NatGateway:
+    Type: AWS::EC2::NatGateway
+    Properties:
+      AllocationId: !GetAtt NatGatewayEIP.AllocationId
+      SubnetId: !Ref PublicSubnet
+      Tags:
+        - Key: Name
+          Value: movie-catalog-nat
+
+  PrivateRouteTable:
+    Type: AWS::EC2::RouteTable
+    Properties:
+      VpcId: !Ref VPC
+      Tags:
+        - Key: Name
+          Value: movie-catalog-private-rt
+
+  PrivateRoute:
+    Type: AWS::EC2::Route
+    Properties:
+      RouteTableId: !Ref PrivateRouteTable
+      DestinationCidrBlock: 0.0.0.0/0
+      NatGatewayId: !Ref NatGateway
+
+  PrivateSubnetARouteTableAssociation:
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    Properties:
+      SubnetId: !Ref PrivateSubnetA
+      RouteTableId: !Ref PrivateRouteTable
+
+  PrivateSubnetBRouteTableAssociation:
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    Properties:
+      SubnetId: !Ref PrivateSubnetB
+      RouteTableId: !Ref PrivateRouteTable
+
+  DBSubnetGroup:
+    Type: AWS::RDS::DBSubnetGroup
+    Properties:
+      DBSubnetGroupDescription: Private subnets for the movie catalog Aurora cluster
+      SubnetIds:
+        - !Ref PrivateSubnetA
+        - !Ref PrivateSubnetB
+
+  # Kept alongside the NAT Gateway: S3 traffic routed via this free Gateway
+  # Endpoint never touches the NAT Gateway at all, avoiding its per-GB
+  # data processing charge for our S3 Tables and dataset file traffic.
+  S3GatewayEndpoint:
+    Type: AWS::EC2::VPCEndpoint
+    Properties:
+      VpcId: !Ref VPC
+      ServiceName: !Sub 'com.amazonaws.${AWS::Region}.s3'
+      VpcEndpointType: Gateway
+      RouteTableIds:
+        - !Ref PrivateRouteTable
+
+  # ============================================================
+  # SECURITY GROUP
+  # ============================================================
+
+  AuroraSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: Allows PostgreSQL access from within the VPC
+      VpcId: !Ref VPC
+      SecurityGroupIngress:
+        - IpProtocol: tcp
+          FromPort: 5432
+          ToPort: 5432
+          CidrIp: 10.20.0.0/16
+      Tags:
+        - Key: Name
+          Value: movie-catalog-aurora-sg
+
+  # AWS Glue creates multiple elastic network interfaces (ENIs) when running
+  # a job, and these ENIs need to communicate with each other over all TCP
+  # ports. This self-referencing rule allows that communication, using the
+  # same security group as our Aurora cluster and Glue connection.
+  AuroraSecurityGroupSelfIngress:
+    Type: AWS::EC2::SecurityGroupIngress
+    Properties:
+      GroupId: !Ref AuroraSecurityGroup
+      IpProtocol: tcp
+      FromPort: 0
+      ToPort: 65535
+      SourceSecurityGroupId: !Ref AuroraSecurityGroup
+
+  # ============================================================
+  # DATABASE CREDENTIALS
+  # ============================================================
+
+  DBSecret:
+    Type: AWS::SecretsManager::Secret
+    Properties:
+      Name: movie-catalog-aurora-credentials
+      Description: Master credentials for the movie catalog Aurora cluster
+      GenerateSecretString:
+        SecretStringTemplate: !Sub '{"username": "${MasterUsername}"}'
+        GenerateStringKey: password
+        PasswordLength: 24
+        ExcludeCharacters: '"@/\'
+
+  # ============================================================
+  # AURORA POSTGRESQL SERVERLESS V2
+  # ============================================================
+
+  AuroraCluster:
+    Type: AWS::RDS::DBCluster
+    DeletionPolicy: Delete
+    Properties:
+      Engine: aurora-postgresql
+      EngineVersion: '16.13'
+      DatabaseName: !Ref DatabaseName
+      MasterUsername: !Ref MasterUsername
+      MasterUserPassword: !Sub '{{resolve:secretsmanager:${DBSecret}::password}}'
+      DBSubnetGroupName: !Ref DBSubnetGroup
+      VpcSecurityGroupIds:
+        - !Ref AuroraSecurityGroup
+      ServerlessV2ScalingConfiguration:
+        MinCapacity: 0.5
+        MaxCapacity: 2
+      StorageEncrypted: true
+      BackupRetentionPeriod: 1
+
+  AuroraInstance:
+    Type: AWS::RDS::DBInstance
+    Properties:
+      Engine: aurora-postgresql
+      DBInstanceClass: db.serverless
+      DBClusterIdentifier: !Ref AuroraCluster
+      PubliclyAccessible: false
+
+  # Attach the cluster ARN to the secret so it shows up as "associated"
+  # with this database in the Secrets Manager console.
+  SecretTargetAttachment:
+    Type: AWS::SecretsManager::SecretTargetAttachment
+    Properties:
+      SecretId: !Ref DBSecret
+      TargetId: !Ref AuroraCluster
+      TargetType: AWS::RDS::DBCluster
+
+Outputs:
+  DBClusterEndpoint:
+    Description: Writer endpoint for the Aurora cluster
+    Value: !GetAtt AuroraCluster.Endpoint.Address
+
+  DBClusterPort:
+    Description: Port for the Aurora cluster
+    Value: !GetAtt AuroraCluster.Endpoint.Port
+
+  DatabaseName:
+    Description: Name of the initial database
+    Value: !Ref DatabaseName
+
+  SecretName:
+    Description: Name of the Secrets Manager secret containing the master credentials
+    Value: !Ref DBSecret
+
+  VPCId:
+    Description: ID of the VPC created for this exercise
+    Value: !Ref VPC
+
+  PrivateSubnetAId:
+    Description: ID of private subnet A, for use when creating a CloudShell VPC environment
+    Value: !Ref PrivateSubnetA
