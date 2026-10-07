@@ -25,7 +25,7 @@ DEVICE_TYPES = ["smart_tv", "mobile", "web"]
 def film_duration_seconds(film_id):
     return random.Random(film_id).randint(80, 180) * 60
 
-z
+
 kinesis = boto3.client("kinesis")
 
 
